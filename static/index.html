@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Test Player</title>
+</head>
+
+<body>
+    <p>An experiment to see if I can sufficiently synchronize the playback of a midi file across multiple clients.</p>
+
+    <button onclick="connect()">
+        Connect
+    </button>
+
+    <button onclick="disconnect()">
+        Disconnect
+    </button>
+
+    <p id="delta">Delta: </p>
+
+    <script src="https://unpkg.com/jzz"></script>
+    <script src="https://unpkg.com/jzz-synth-tiny"></script>
+    <script>
+        JZZ.synth.Tiny.register('Web Audio');
+
+        // Establish a connection to the server
+        function connect() {
+            var midiAccess = JZZ().openMidiOut('Web Audio');
+
+            var ws = new WebSocket('ws://' + window.location.hostname + '/ws');
+            ws.onopen = function () {
+                console.log('Connected');
+            };
+            ws.onmessage = function (event) {
+                // 0-7: 8 byte unsigned integer representing the send time
+                // 8: unsigned integer representing the message type
+                // 9-: raw midi message
+                event.data.arrayBuffer().then(buffer => {
+                    var time = new DataView(buffer, 0, 8).getBigUint64(0);
+                    var type = new DataView(buffer, 8, 1).getInt8(0);
+
+                    switch (type) {
+                        case 0:
+                            break;
+                        case 1:
+                            var midi = buffer.slice(9);
+                            var midiArray = Array.from(new Uint8Array(midi));
+                            midiAccess.send(midiArray);
+                            break;
+                    }
+                });
+            };
+            ws.onclose = function () {
+                console.log('Disconnected');
+            };
+        }
+
+        // Close the connection to the server
+        function disconnect() {
+            ws.close();
+        }
+    </script>
+
+</body>
+
+</html>
