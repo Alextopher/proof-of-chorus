@@ -79,7 +79,7 @@ func (h *Hub) MonotonicTime() float64 {
 
 func (h *Hub) run() {
 	// Periodically send the current time to all clients
-	const timeSyncInterval = 1000 * time.Millisecond
+	const timeSyncInterval = 250 * time.Millisecond
 	ticker := time.NewTicker(timeSyncInterval)
 
 	for {
@@ -155,7 +155,7 @@ func main() {
 
 	// Broadcast a Simple MIDI Format file after waiting for command-line input
 	go func() {
-		file, err := os.Open("rushE.mid")
+		file, err := os.Open("queen.mid")
 		if err != nil {
 			log.Fatal(err)
 		}

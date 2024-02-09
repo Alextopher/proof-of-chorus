@@ -22,19 +22,26 @@
     <script src="https://unpkg.com/jzz-synth-tiny"></script>
     <script>
         JZZ.synth.Tiny.register('Web Audio');
-        var ws = new WebSocket('ws://localhost:8080/ws');
+        // Websocket is at /ws, we might be at a weird port, and either http or https
+        if (window.location.protocol === 'https:') {
+            var ws = new WebSocket('wss://' + window.location.host + '/ws');
+        } else {
+            var ws = new WebSocket('ws://' + window.location.host + '/ws');
+        }
 
         // Establish a connection to the server
         function connect() {
             var midiAccess = JZZ().openMidiOut('Web Audio');
             var midiEvents = [];
 
-            // delta = clientTime - serverTime
-            // so 
-            // delta + serverTime = clientTime
-            let delta = 0;
+            // Keep a rolling average of the time difference between the server and the client
+            let deltas = [];
+            const rollingLength = 25;
+            function getDelta() {
+                return deltas.reduce((a, b) => a + b, 0) / deltas.length
+            }
             setInterval(() => {
-                document.getElementById('delta').innerText = 'Delta: ' + delta;
+                document.getElementById('delta').innerText = 'Delta: ' + getDelta().toFixed(2);
             }, 1000);
 
             // Connect to the server
@@ -49,7 +56,10 @@
                         case 0:
                             const serverTime = Number(new DataView(buffer, 1, 8).getFloat64(0));
                             const clientTime = performance.now();
-                            delta = clientTime - serverTime;
+                            if (deltas.length >= rollingLength) {
+                                deltas.shift();
+                            }
+                            deltas.push(clientTime - serverTime);
                             break;
                         // MIDI EVENT(s)
                         case 1:
@@ -79,14 +89,12 @@
                         case 3:
                             // 1-9 - Start time
                             const serverStartTime = new DataView(buffer, 1, 8).getFloat64(0);
-                            const startTime = serverStartTime + delta;
+                            const startTime = serverStartTime + getDelta();
                             console.log('Start', 'Server Start Time: ' + serverStartTime, 'Start Time: ' + startTime);
-                            // sort midi events by absTime
                             midiEvents.sort((a, b) => a.absTime - b.absTime);
-
-                            // Midi events need to be [number] instead of uint8array
                             midiEvents.forEach(event => {
                                 event.data = [...event.data];
+                                event.absTime += startTime;
                             });
 
                             playback(startTime);
@@ -107,11 +115,15 @@
                 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
                 // Sleep until the start time
-                await sleep(startTime - performance.now());
+                // await sleep(startTime - performance.now());
+
+                // make the bg color green
+                document.body.style.backgroundColor = 'green';
 
                 // Start the midi playback
                 for (let i = 0; i < midiEvents.length; i++) {
                     const event = midiEvents[i];
+                    console.log('Event', event.absTime, performance.now() - startTime, event.data);
                     if (event.absTime < performance.now()) {
                         // Send the midi event
                         midiAccess.send(event.data);
