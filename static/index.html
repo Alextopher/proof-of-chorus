@@ -16,36 +16,84 @@
         Disconnect
     </button>
 
-    <p id="delta">Delta: </p>
+    <p id="delta"></p>
 
-    <script src="https://unpkg.com/jzz"></script>
-    <script src="https://unpkg.com/jzz-synth-tiny"></script>
+    <!-- <script src="https://unpkg.com/jzz"></script> -->
+    <!-- <script src="https://unpkg.com/jzz-synth-tiny"></script> -->
+    <script src='https://cdn.jsdelivr.net/npm/webaudio-tinysynth'></script>
     <script>
-        JZZ.synth.Tiny.register('Web Audio');
+        // JZZ.synth.Tiny.register('Web Audio');
+        var ws = new WebSocket('ws://localhost:8080/ws');
 
         // Establish a connection to the server
         function connect() {
-            var midiAccess = JZZ().openMidiOut('Web Audio');
+            const midiAccess = new WebAudioTinySynth({ quality: 0, useReverb: 0, voices: 32 })
+            midiAccess.setTsMode(1)
 
-            var ws = new WebSocket('ws://' + window.location.hostname + '/ws');
+            var midiEvents = [];
+
+            // delta = clientTime - serverTime
+            // so 
+            // delta + serverTime = clientTime
+            let delta = 0;
+            setInterval(() => {
+                document.getElementById('delta').innerText = 'Delta: ' + delta;
+            }, 1000);
+
+            // Connect to the server
             ws.onopen = function () {
                 console.log('Connected');
             };
             ws.onmessage = function (event) {
-                // 0-7: 8 byte unsigned integer representing the send time
-                // 8: unsigned integer representing the message type
-                // 9-: raw midi message
                 event.data.arrayBuffer().then(buffer => {
-                    var time = new DataView(buffer, 0, 8).getBigUint64(0);
-                    var type = new DataView(buffer, 8, 1).getInt8(0);
-
+                    const type = new DataView(buffer, 0).getUint8(0);
                     switch (type) {
+                        // TIME SYNC
                         case 0:
+                            const serverTime = Number(new DataView(buffer, 1, 8).getFloat64(0));
+                            const clientTime = performance.now();
+                            delta = clientTime - serverTime;
                             break;
+                        // MIDI EVENT(s)
                         case 1:
-                            var midi = buffer.slice(9);
-                            var midiArray = Array.from(new Uint8Array(midi));
-                            midiAccess.send(midiArray);
+                            console.log('Midi Event');
+                            // Start iteration from the second byte
+                            for (let i = 1; i < buffer.byteLength; i += 11) {
+                                // Check if there's enough space for absTime and data
+                                if (i + 11 <= buffer.byteLength) {
+                                    const absTime = new DataView(buffer, i, 8).getFloat64(0);
+                                    const data = new Uint8Array(buffer, i + 8, 3);
+                                    midiEvents.push({ absTime, data });
+                                } else {
+                                    // Handle incomplete event data or end of buffer
+                                    break;
+                                }
+                            }
+                            break;
+                        // Program Changes
+                        case 2:
+                            // 1-9 - absTime (float64)
+                            // 10-11 - midi data
+                            const absTime = new DataView(buffer, 1, 8).getFloat64(0);
+                            const data = new Uint8Array(buffer, 9, 2);
+                            // midiEvents.push({ absTime, data });
+                            break;
+                        // START
+                        case 3:
+                            // 1-9 - Start time
+                            const serverStartTime = new DataView(buffer, 1, 8).getFloat64(0);
+                            const startTime = serverStartTime + delta;
+                            console.log('Start', 'Server Start Time: ' + serverStartTime, 'Start Time: ' + startTime);
+                            // sort midi events by absTime
+                            midiEvents.sort((a, b) => a.absTime - b.absTime);
+                            playback(startTime);
+                            break;
+                        // STOP
+                        case 4:
+                            midiAccess.stopMIDI();
+                            midiAccess.reset();
+                            midiEvents = [];
+                            console.log('Stop');
                             break;
                     }
                 });
@@ -53,12 +101,37 @@
             ws.onclose = function () {
                 console.log('Disconnected');
             };
+
+            // Core playback loop
+            async function playback(startTime) {
+                const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+                // Sleep until the start time
+                await sleep(startTime - performance.now());
+
+                // Start the midi playback
+                for (let i = 0; i < midiEvents.length; i++) {
+                    const event = midiEvents[i];
+                    if (event.absTime < performance.now()) {
+                        // Send the midi event
+                        midiAccess.send(event.data);
+                    } else {
+                        // Sleep until the event time 
+                        await sleep(event.absTime - performance.now());
+                        // Send the midi event
+                        midiAccess.send(event.data);
+                    }
+                    // Send the midi event
+                    midiAccess.send(event.data);
+                }
+            }
         }
 
         // Close the connection to the server
         function disconnect() {
             ws.close();
         }
+
     </script>
 
 </body>

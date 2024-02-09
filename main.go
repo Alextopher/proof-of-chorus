@@ -4,9 +4,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
-	"slices"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -18,37 +18,47 @@ var hub = Hub{
 	clients:    make(map[*Client]struct{}),
 	register:   make(chan *Client),
 	unregister: make(chan *Client),
-	broadcast:  make(chan Message),
+	broadcast:  make(chan []byte),
+	created:    time.Now(),
 }
 
 type MessageType byte
 
 const (
-	TimeSync    MessageType = 0
-	MidiMessage MessageType = 1
+	TimeSync      MessageType = 0
+	MidiMessage   MessageType = 1
+	ProgramChange MessageType = 2
+	StartEvent    MessageType = 3
+	StopEvent     MessageType = 4
 )
 
-// Message struct is used to send messages between clients
-// All messages need a timestamp of _when they were created_.
-//
-// For midi playback we want to keep a consistent 100ms delay from the server calling "play"
-// to the client actually playing the note.
-//
-// 0-7: Timestamp
-// 8:   MessageType
-// 9-:  Content
-type Message struct {
-	Timestamp uint64
-	Type      MessageType
-	Content   midi.Message
+func NewTimeSyncMessage(t float64) []byte {
+	// Create a byte slice from a time.Duration
+	var buf [9]byte
+	buf[0] = byte(TimeSync)
+	binary.BigEndian.PutUint64(buf[1:], math.Float64bits(t))
+	return buf[:]
 }
 
-// Creates a byte slice from a message
-func (m Message) Bytes() []byte {
-	b := make([]byte, 9)
-	binary.BigEndian.PutUint64(b, m.Timestamp)
-	b[8] = byte(m.Type)
-	return slices.Concat(b, m.Content.Bytes())
+func NewProgramChangeMessage(t float64, b []byte) []byte {
+	var buf [9]byte
+	buf[0] = byte(ProgramChange)
+	binary.BigEndian.PutUint64(buf[1:], math.Float64bits(t))
+	return append(buf[:], b...)
+}
+
+func NewStartEventMessage(t float64) []byte {
+	// 0 - MessageType StartEvent
+	// 1-9 - start time (float64)
+	var buf [9]byte
+	buf[0] = byte(StartEvent)
+	binary.BigEndian.PutUint64(buf[1:], math.Float64bits(t))
+	return buf[:]
+}
+
+func NewStopEventMessage() []byte {
+	// 0 - MessageType StopEvent
+	return []byte{byte(StopEvent)}
 }
 
 type Hub struct {
@@ -56,7 +66,15 @@ type Hub struct {
 	clients    map[*Client]struct{}
 	register   chan *Client
 	unregister chan *Client
-	broadcast  chan Message
+	broadcast  chan []byte
+
+	// Creation time
+	created time.Time
+}
+
+// MonotonicTime returns the time since the hub was created in milliseconds
+func (h *Hub) MonotonicTime() float64 {
+	return float64(time.Now().Sub(h.created).Milliseconds())
 }
 
 func (h *Hub) run() {
@@ -71,20 +89,15 @@ func (h *Hub) run() {
 		case client := <-h.unregister:
 			delete(h.clients, client)
 		case <-ticker.C:
-			msg := Message{
-				Timestamp: uint64(time.Now().UnixMilli()),
-				Type:      TimeSync,
-			}.Bytes()
-
+			msg := NewTimeSyncMessage(h.MonotonicTime())
 			for client := range h.clients {
 				client.send <- msg
 			}
 		case message := <-h.broadcast:
-			msg := message.Bytes()
+			msg := message
 			for client := range h.clients {
 				client.send <- msg
 			}
-			ticker.Reset(timeSyncInterval)
 		}
 	}
 }
@@ -112,44 +125,9 @@ func (c *Client) writePump() {
 				c.CloseConn()
 				return
 			}
-
-			log.Println("Sending message to client")
 			c.conn.WriteMessage(websocket.BinaryMessage, message)
 		}
 	}
-}
-
-func (h Hub) Open() error {
-	return nil
-}
-
-func (h Hub) Close() error {
-	return nil
-}
-
-func (h Hub) IsOpen() bool {
-	return true
-}
-
-func (h Hub) Number() int {
-	return 424242
-}
-
-func (h Hub) String() string {
-	return "Websocket Hub"
-}
-
-func (h Hub) Underlying() interface{} {
-	return nil
-}
-
-func (h Hub) Send(data []byte) error {
-	h.broadcast <- Message{
-		Timestamp: uint64(time.Now().UnixMilli()),
-		Type:      MidiMessage,
-		Content:   midi.Message(data),
-	}
-	return nil
 }
 
 // Handle websocket connections
@@ -177,8 +155,7 @@ func main() {
 
 	// Broadcast a Simple MIDI Format file after waiting for command-line input
 	go func() {
-		// open queen.mid
-		file, err := os.Open("queen.mid")
+		file, err := os.Open("rushE.mid")
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -187,20 +164,49 @@ func main() {
 		fmt.Println("Press enter to start playback")
 		fmt.Scanln()
 
-		smf.ReadTracksFrom(file).
-			Do(
-				func(te smf.TrackEvent) {
-					if te.Message.IsMeta() {
-						fmt.Printf("[%v] @%vms %s\n", te.TrackNo, te.AbsMicroSeconds/1000, te.Message.String())
-					} else {
-						fmt.Printf("[%v] %s\n", te.TrackNo, te.Message)
+		grouper := groupEvents(hub.broadcast)
+
+		// Preload midi events
+		smf.ReadTracksFrom(file).Do(func(te smf.TrackEvent) {
+			msg := te.Message
+			if msg.IsPlayable() {
+				time := float64(te.AbsMicroSeconds) / 1000.0
+
+				if msg.Type().Is(midi.ProgramChangeMsg) {
+					// Program change messages are handled differently
+					hub.broadcast <- NewProgramChangeMessage(time, msg.Bytes())
+				} else {
+					grouper <- playEvent{
+						absTime: time,
+						data:    msg.Bytes(),
 					}
-				},
-			).Play(hub)
+				}
+			}
+		})
+		close(grouper)
+
+		// Wait 5 seconds before starting playback
+		time.Sleep(5 * time.Second)
+
+		// Broadcast a start event to begin playback after 5 seconds
+		hub.broadcast <- NewStartEventMessage(hub.MonotonicTime() + 5000)
+
+		// Countdown on the console
+		for i := 5; i > 0; i-- {
+			fmt.Println(i)
+			time.Sleep(1 * time.Second)
+		}
+
+		// Wait for user input to stop playback
+		fmt.Println("Press enter to stop playback")
+		fmt.Scanln()
+
+		// Broadcast a stop event to end playback
+		hub.broadcast <- NewStopEventMessage()
 	}()
 
 	go hub.run()
 
-	log.Println("Server started on: http://localhost")
-	http.ListenAndServe(":80", nil)
+	log.Println("Server started on: http://localhost:8080")
+	http.ListenAndServe(":8080", nil)
 }
