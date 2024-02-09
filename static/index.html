@@ -18,18 +18,15 @@
 
     <p id="delta"></p>
 
-    <!-- <script src="https://unpkg.com/jzz"></script> -->
-    <!-- <script src="https://unpkg.com/jzz-synth-tiny"></script> -->
-    <script src='https://cdn.jsdelivr.net/npm/webaudio-tinysynth'></script>
+    <script src="https://unpkg.com/jzz"></script>
+    <script src="https://unpkg.com/jzz-synth-tiny"></script>
     <script>
-        // JZZ.synth.Tiny.register('Web Audio');
+        JZZ.synth.Tiny.register('Web Audio');
         var ws = new WebSocket('ws://localhost:8080/ws');
 
         // Establish a connection to the server
         function connect() {
-            const midiAccess = new WebAudioTinySynth({ quality: 0, useReverb: 0, voices: 32 })
-            midiAccess.setTsMode(1)
-
+            var midiAccess = JZZ().openMidiOut('Web Audio');
             var midiEvents = [];
 
             // delta = clientTime - serverTime
@@ -76,7 +73,7 @@
                             // 10-11 - midi data
                             const absTime = new DataView(buffer, 1, 8).getFloat64(0);
                             const data = new Uint8Array(buffer, 9, 2);
-                            // midiEvents.push({ absTime, data });
+                            midiEvents.push({ absTime, data });
                             break;
                         // START
                         case 3:
@@ -86,13 +83,16 @@
                             console.log('Start', 'Server Start Time: ' + serverStartTime, 'Start Time: ' + startTime);
                             // sort midi events by absTime
                             midiEvents.sort((a, b) => a.absTime - b.absTime);
+
+                            // Midi events need to be [number] instead of uint8array
+                            midiEvents.forEach(event => {
+                                event.data = [...event.data];
+                            });
+
                             playback(startTime);
                             break;
                         // STOP
                         case 4:
-                            midiAccess.stopMIDI();
-                            midiAccess.reset();
-                            midiEvents = [];
                             console.log('Stop');
                             break;
                     }
@@ -121,8 +121,6 @@
                         // Send the midi event
                         midiAccess.send(event.data);
                     }
-                    // Send the midi event
-                    midiAccess.send(event.data);
                 }
             }
         }
